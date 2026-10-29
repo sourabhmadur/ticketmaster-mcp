@@ -1,86 +1,94 @@
 # ticketmaster-mcp
 
-An MCP server that gives Claude (or any MCP client) access to the
-[Ticketmaster Discovery API](https://developer.ticketmaster.com/products-and-docs/apis/discovery-api/v2/)
-so it can answer questions like *"any Taylor Swift shows near me in the next
-60 days?"* or *"what's on at Chase Center this weekend?"*.
+A Python MCP server that lets Claude (or any MCP client) search Ticketmaster events, artists and teams, and venues through the [Ticketmaster Discovery API v2](https://developer.ticketmaster.com/products-and-docs/apis/discovery-api/v2/).
+
+It can answer questions like *"any comedy shows near me this weekend?"* or *"when does the next Warriors game go on sale?"*.
 
 ## Tools
 
-| Tool | Purpose |
+| Tool | What it does |
 | --- | --- |
-| `search_events` | Search events by keyword, location, classification, date range, attraction, or venue. |
-| `get_event_details` | Full details (sales windows, seatmap, accessibility, info) for one event id. |
-| `search_attractions` | Find artists, teams, and other attractions by name. |
-| `get_attraction_details` | Profile + upcoming-event count for one attraction id. |
-| `search_venues` | Find venues by name and/or location. |
-| `get_venue_details` | Full venue profile by id. |
+| `search_events` | Searches events by keyword, `"lat,lng"` + radius, city or state, classification (e.g. `music`, `comedy`, `nba`), UTC date range, attraction id, or venue id. Supports several sort orders. |
+| `get_event_details` | Returns one event's core fields plus sales windows, seat map, ticket limits, accessibility info, notes, and images. |
+| `search_attractions` | Finds artists, teams, and shows by name, with genre and upcoming-event count. |
+| `get_attraction_details` | Returns the full attraction record for an id. |
+| `search_venues` | Finds venues by name and/or `"lat,lng"` + radius, city, or state. |
+| `get_venue_details` | Returns the full venue record for an id. |
 
-Any tool that takes a `location` accepts `"lat,lng"`. Pair it with the
-`google-maps-mcp` server's `get_my_location` for "near me" queries.
+Event results are trimmed to the fields an LLM needs: date and time, status, sales window, venue with coordinates, performers, genre, and price ranges. This keeps responses small.
 
-## Setup
+## Example
 
-### 1. Get a Discovery API key
+*This is an illustrative example of how Claude uses the tools. It is not a recorded transcript.*
 
-1. Register at https://developer-acct.ticketmaster.com/user/register.
-2. Create an app; the "Consumer Key" is your API key.
-3. The free tier gives 5,000 calls/day at 5 requests/second — plenty for
-   interactive use.
+> **You:** What comedy shows are on in San Francisco this weekend?
+>
+> **Claude:** *(calls `search_events` with `classification="comedy"`, `location="37.7749,-122.4194"`, `radius_miles=10`, and a Friday-to-Sunday UTC `start_datetime`/`end_datetime`)*
+> I found several. *[Comedian]* is at Cobb's Comedy Club on Saturday at 7:00 PM, and *[Show]* is at ... Do you want sales details for one of them?
+>
+> **You:** The first one. Are tickets still on sale?
+>
+> **Claude:** *(calls `get_event_details` with that event's id)*
+> Yes. Public sales are open until the show starts, with a ticket limit of ... Here's the Ticketmaster link: ...
 
-### 2. Install the server
+## Requirements
+
+- Python 3.10+
+- A free Ticketmaster Discovery API key. Register at <https://developer-acct.ticketmaster.com/user/register> and create an app. The app's **Consumer Key** is your API key. Ticketmaster's portal lists the current rate limits.
+
+## Install
 
 ```sh
-cd ticketmaster_mcp
+git clone https://github.com/sourabhmadur/ticketmaster-mcp.git
+cd ticketmaster-mcp
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-cp .env.example .env
-# paste your TICKETMASTER_API_KEY
+cp .env.example .env   # then set TICKETMASTER_API_KEY
 ```
 
-### 3. Register with Claude Code
+## Connect to Claude
+
+**Claude Code**
 
 ```sh
-claude mcp add ticketmaster \
-  --command "/absolute/path/to/ticketmaster_mcp/.venv/bin/ticketmaster-mcp" \
-  --env TICKETMASTER_API_KEY=your_key_here
+claude mcp add ticketmaster -e TICKETMASTER_API_KEY=your_key_here \
+  -- /absolute/path/to/ticketmaster-mcp/.venv/bin/ticketmaster-mcp
 ```
 
-Or with `uv`:
+**Claude Desktop**: add this to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "ticketmaster": {
+      "command": "/absolute/path/to/ticketmaster-mcp/.venv/bin/ticketmaster-mcp",
+      "env": { "TICKETMASTER_API_KEY": "your_key_here" }
+    }
+  }
+}
+```
+
+## Sanity check
+
+This lists the registered tools. It makes no API calls.
 
 ```sh
-claude mcp add ticketmaster \
-  --command "uv" \
-  --args "run" "--directory" "/absolute/path/to/ticketmaster_mcp" "ticketmaster-mcp" \
-  --env TICKETMASTER_API_KEY=your_key_here
+python -c "import asyncio; from ticketmaster_mcp.server import mcp; print([t.name for t in asyncio.run(mcp.list_tools())])"
 ```
 
-## Quick sanity check
-
-```sh
-source .venv/bin/activate
-python -c "from ticketmaster_mcp.server import mcp; print([t.name for t in mcp._tool_manager.list_tools()])"
-```
-
-You should see all six tool names. To smoke-test the API key:
+To check your key with one API call:
 
 ```sh
 curl "https://app.ticketmaster.com/discovery/v2/events.json?size=1&apikey=$TICKETMASTER_API_KEY" | head -c 200
 ```
 
-## Example prompts
-
-- *"Find rock concerts within 25 miles of 37.7749,-122.4194 in the next month."*
-- *"Search Ticketmaster for Hamilton, then show me the next 5 shows."*
-- *"What events are on at venue KovZpZA7AAEA next weekend?"*
-- *"Get sales-window and accessibility info for event G5vYZbpYf-VTk."*
-
 ## Notes
 
-- **Date filters are UTC.** Pass ISO-8601 with the `Z` suffix
-  (e.g. `2026-05-26T00:00:00Z`). The API rejects unzoned strings.
-- **`classificationName` is fuzzy.** "music", "rock", "country", "hip-hop",
-  "sports", "nba", etc. all work. Combine with `keyword` for precision.
-- **For "events at venue X" queries**, prefer `venue_id` (from
-  `search_venues`) over a keyword — venue names collide.
+- **Dates are UTC ISO-8601 with a `Z` suffix**, e.g. `2026-05-26T00:00:00Z`.
+- **`classification` is matched loosely.** Values like `music`, `rock`, `sports`, and `nba` all work. Add `keyword` to narrow results.
+- **For "events at venue X"**, look up the `venue_id` with `search_venues` first. Venue names aren't unique.
+
+## Works well with
+
+[google-maps-mcp](https://github.com/sourabhmadur/google-maps-mcp): its `get_my_location` returns the `"lat,lng"` that `search_events` uses for "near me" queries.
